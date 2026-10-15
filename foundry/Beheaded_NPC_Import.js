@@ -1,7 +1,9 @@
 // The Beheaded: NPC import (Foundry v14, PF2e 8.4.x)
 // Creates or updates every Beheaded NPC from beheaded-npcs.json, with portrait art
 // and dynamic-ring tokens. All files load from the public beheaded-refs repo.
-// Run as a GM (or Assistant GM) from a Script macro.
+// Run as a GM from a Script macro. Run order with the other Beheaded macros:
+// Armory Builder, then this, then NPC Inventories, then Sholtan Journals.
+// Actors made by the older importer are adopted by name, not duplicated.
 
 const BASE = "https://raw.githubusercontent.com/Attackins/beheaded-refs/main/foundry/";
 const ROOT_FOLDER = "The Beheaded";
@@ -159,7 +161,15 @@ function buildArt(entry) {
 }
 
 // Import
+// Actors from this macro carry a flag. Actors from the older importer don't, so any
+// NPC inside the "The Beheaded" folder tree with a matching name is adopted instead
+// of duplicated.
+const inRoot = (a) => { let f = a.folder; while (f) { if (f.id === root.id) return true; f = f.folder; } return false; };
 const existing = new Map(game.actors.filter((a) => a.getFlag(FLAG, "key")).map((a) => [a.getFlag(FLAG, "key"), a]));
+for (const a of game.actors) {
+  if (a.type === "npc" && !a.getFlag(FLAG, "key") && inRoot(a) && !existing.has(a.name)) existing.set(a.name, a);
+}
+const STAT_TYPES = new Set(["melee", "action", "lore", "spellcastingEntry", "spell", "effect"]);
 let created = 0, updated = 0, skipped = 0, failed = [];
 ui.notifications.info(`Importing ${data.length} Beheaded NPCs...`);
 
@@ -182,10 +192,12 @@ for (const entry of data) {
     } else if (mode === "new") {
       skipped++;
     } else if (mode === "art") {
-      if (entry.art) { await actor.update(art); updated++; } else skipped++;
+      if (entry.art) { await actor.update({ ...art, [`flags.${FLAG}.key`]: entry.name }); updated++; } else skipped++;
     } else {
-      await actor.update({ system: buildSystem(entry), ...art });
-      const old = actor.items.filter((it) => it.getFlag(FLAG, "imported")).map((it) => it.id);
+      const adopted = !actor.getFlag(FLAG, "key");
+      await actor.update({ system: buildSystem(entry), ...art, folder: folders[entry.folder].id, [`flags.${FLAG}.key`]: entry.name });
+      // Replace the stat items (strikes, abilities, lores). Carried gear stays.
+      const old = actor.items.filter((it) => it.getFlag(FLAG, "imported") || (adopted && STAT_TYPES.has(it.type))).map((it) => it.id);
       if (old.length) await actor.deleteEmbeddedDocuments("Item", old);
       await actor.createEmbeddedDocuments("Item", buildItems(entry));
       updated++;
