@@ -7,7 +7,9 @@
 
 const BASE = "https://raw.githubusercontent.com/Attackins/beheaded-refs/main/foundry/";
 const ROOT_FOLDER = "The Beheaded";
-const FLAG = "beheaded";
+// Flags live in the "world" scope: Foundry rejects getFlag/setFlag on any scope that
+// isn't a system, module or "world".
+const FLAG = "world";
 
 // Ring colours. Ring is the scarf red for members; the fill behind the bust is the Corps colour.
 const SCARF = "#b3261e";
@@ -27,6 +29,7 @@ const CORPS = {
 
 if (!game.user.isGM) return ui.notifications.error("Run this as a GM.");
 
+console.log(`Beheaded import | Foundry ${game.version}, PF2e ${game.system.version}`);
 const mode = await foundry.applications.api.DialogV2.wait({
   window: { title: "Import the Beheaded NPCs" },
   content: `<p>Creates any NPC that isn't in the world yet, inside the <b>${ROOT_FOLDER}</b> folder.</p>
@@ -102,7 +105,10 @@ function buildItems(entry) {
       delete it.system.action;
       delete it.system.subjectToMAP;
     }
-    it.flags = { [FLAG]: { imported: true } };
+    // Keep only traits the system knows; the full attack line stays in the description.
+    const allowed = it.type === "melee" ? CONFIG.PF2E.npcAttackTraits : CONFIG.PF2E.actionTraits;
+    if (allowed && it.system?.traits?.value) it.system.traits.value = it.system.traits.value.filter((t) => t in allowed);
+    it.flags = { [FLAG]: { beheadedImported: true } };
     items.push(it);
   }
   for (const [slug, s] of Object.entries(entry.skills ?? {})) {
@@ -111,10 +117,22 @@ function buildItems(entry) {
       name: slug.endsWith("-lore") ? titleCase(slug) : `${titleCase(slug)} Lore`,
       type: "lore",
       system: { mod: { value: s.base } },
-      flags: { [FLAG]: { imported: true } },
+      flags: { [FLAG]: { beheadedImported: true } },
     });
   }
   return items;
+}
+
+function splitLanguages(entry) {
+  // Only real language slugs go in the list; "two regional" and the like go to the details line.
+  const known = CONFIG.PF2E.languages ?? {};
+  const value = [], extra = [];
+  for (const l of entry.languages ?? []) {
+    const slug = String(l).toLowerCase().trim().replace(/\s+/g, "-");
+    if (slug in known) value.push(slug); else extra.push(String(l).trim());
+  }
+  const details = [entry.languageDetails, ...extra].filter(Boolean).join(", ");
+  return { value: [...new Set(value)], details };
 }
 
 function buildSystem(entry) {
@@ -141,10 +159,14 @@ function buildSystem(entry) {
       blurb: entry.blurb ?? "",
       publicNotes: entry.notes ?? "",
       privateNotes: "",
-      languages: { value: entry.languages ?? [], details: entry.languageDetails ?? "" },
+      languages: splitLanguages(entry),
       publication: { title: "The Beheaded", authors: "", license: "OGL", remaster: true },
     },
-    traits: { value: entry.traits ?? [], rarity: entry.rarity ?? "common", size: { value: entry.size ?? "med" } },
+    traits: {
+      value: (entry.traits ?? []).filter((t) => !CONFIG.PF2E.creatureTraits || t in CONFIG.PF2E.creatureTraits),
+      rarity: entry.rarity ?? "common",
+      size: { value: entry.size ?? "med" },
+    },
   };
 }
 
@@ -165,12 +187,13 @@ function buildArt(entry) {
 // NPC inside the "The Beheaded" folder tree with a matching name is adopted instead
 // of duplicated.
 const inRoot = (a) => { let f = a.folder; while (f) { if (f.id === root.id) return true; f = f.folder; } return false; };
-const existing = new Map(game.actors.filter((a) => a.getFlag(FLAG, "key")).map((a) => [a.getFlag(FLAG, "key"), a]));
+const existing = new Map(game.actors.filter((a) => a.getFlag(FLAG, "beheadedKey")).map((a) => [a.getFlag(FLAG, "beheadedKey"), a]));
 for (const a of game.actors) {
-  if (a.type === "npc" && !a.getFlag(FLAG, "key") && inRoot(a) && !existing.has(a.name)) existing.set(a.name, a);
+  if (a.type === "npc" && !a.getFlag(FLAG, "beheadedKey") && inRoot(a) && !existing.has(a.name)) existing.set(a.name, a);
 }
 const STAT_TYPES = new Set(["melee", "action", "lore", "spellcastingEntry", "spell", "effect"]);
-let created = 0, updated = 0, skipped = 0, failed = [];
+let created = 0, updated = 0, skipped = 0;
+const failed = [], badItems = [];
 ui.notifications.info(`Importing ${data.length} Beheaded NPCs...`);
 
 for (const entry of data) {
@@ -178,36 +201,49 @@ for (const entry of data) {
     const actor = existing.get(entry.name);
     const art = buildArt(entry);
     if (!actor) {
-      await Actor.create({
+      const base = {
         name: entry.name,
         type: "npc",
         folder: folders[entry.folder].id,
         system: buildSystem(entry),
-        items: buildItems(entry),
-        flags: { [FLAG]: { key: entry.name } },
+        flags: { [FLAG]: { beheadedKey: entry.name } },
         ...art,
         prototypeToken: { name: entry.name, disposition: CONST.TOKEN_DISPOSITIONS.NEUTRAL, ...(art.prototypeToken ?? {}) },
-      });
+      };
+      try {
+        await Actor.create({ ...base, items: buildItems(entry) });
+      } catch (err) {
+        // One bad item shouldn't lose the whole NPC: create it bare, then add items one at a time.
+        console.warn(`Beheaded import | ${entry.name}: retrying item by item`, err);
+        const made = await Actor.create(base);
+        for (const it of buildItems(entry)) {
+          try { await made.createEmbeddedDocuments("Item", [it]); }
+          catch (e) { badItems.push(`${entry.name}: ${it.name}`); console.warn(`Beheaded import | ${entry.name} / ${it.name}`, e); }
+        }
+      }
       created++;
     } else if (mode === "new") {
       skipped++;
     } else if (mode === "art") {
-      if (entry.art) { await actor.update({ ...art, [`flags.${FLAG}.key`]: entry.name }); updated++; } else skipped++;
+      if (entry.art) { await actor.update({ ...art, [`flags.${FLAG}.beheadedKey`]: entry.name }); updated++; } else skipped++;
     } else {
-      const adopted = !actor.getFlag(FLAG, "key");
-      await actor.update({ system: buildSystem(entry), ...art, folder: folders[entry.folder].id, [`flags.${FLAG}.key`]: entry.name });
+      const adopted = !actor.getFlag(FLAG, "beheadedKey");
+      await actor.update({ system: buildSystem(entry), ...art, folder: folders[entry.folder].id, [`flags.${FLAG}.beheadedKey`]: entry.name });
       // Replace the stat items (strikes, abilities, lores). Carried gear stays.
-      const old = actor.items.filter((it) => it.getFlag(FLAG, "imported") || (adopted && STAT_TYPES.has(it.type))).map((it) => it.id);
+      const old = actor.items.filter((it) => it.getFlag(FLAG, "beheadedImported") || (adopted && STAT_TYPES.has(it.type))).map((it) => it.id);
       if (old.length) await actor.deleteEmbeddedDocuments("Item", old);
       await actor.createEmbeddedDocuments("Item", buildItems(entry));
       updated++;
     }
   } catch (err) {
     console.error(`Beheaded import | ${entry.name}`, err);
-    failed.push(entry.name);
+    failed.push(`${entry.name}: ${err.message}`);
   }
 }
 
-const msg = `Beheaded import: ${created} created, ${updated} updated, ${skipped} skipped${failed.length ? `, ${failed.length} failed (see console)` : ""}.`;
-failed.length ? ui.notifications.warn(msg) : ui.notifications.info(msg);
+const msg = `Beheaded import: ${created} created, ${updated} updated, ${skipped} skipped` +
+  (failed.length ? `, ${failed.length} failed. First error: ${failed[0]}` : "") +
+  (badItems.length ? `. ${badItems.length} items skipped (console).` : ".");
+failed.length || badItems.length ? ui.notifications.warn(msg, { permanent: true }) : ui.notifications.info(msg);
 if (failed.length) console.warn("Beheaded import | failed:", failed);
+if (badItems.length) console.warn("Beheaded import | items skipped:", badItems);
