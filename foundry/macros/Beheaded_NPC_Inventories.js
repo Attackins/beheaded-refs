@@ -1,6 +1,6 @@
 /* ============================================================================
  * THE BEHEADED - NPC INVENTORIES (Foundry v14, PF2e 8.4.x)
- * Rebuilt from the current stat blocks, 21 October 2026.
+ * Rebuilt from the current stat blocks, 28 October 2026.
  *
  * HOW TO RUN
  *   GM only. Run AFTER the Armory Builder and the NPC Import, since it copies
