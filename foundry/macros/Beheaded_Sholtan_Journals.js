@@ -1,6 +1,6 @@
 /* ============================================================================
  * THE BEHEADED - SHOLTAN JOURNALS (Foundry v14, PF2e 8.4.x)
- * Rebuilt from the current module and handouts, 15 October 2026.
+ * Rebuilt from the current module and handouts, 28 October 2026.
  *
  * HOW TO RUN
  *   GM only. Macro Directory > Create Macro > Type: Script. Paste, save, click.
